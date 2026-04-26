@@ -1,0 +1,523 @@
+#include <WiFi.h>
+#include <esp_now.h>
+#include "esp_wifi.h"
+#include <math.h>
+
+// ---------- NODE MAP ----------
+#define WAIST_NODE   1
+#define R_UPPER_NODE 2
+#define R_FORE_NODE  3
+#define L_UPPER_NODE 4
+#define L_FORE_NODE  5
+
+
+typedef struct {
+
+  uint8_t node_id;
+
+  float ax,ay,az;
+  float gx,gy,gz;
+
+  float roll,pitch,yaw;
+
+  float q0,q1,q2,q3;
+
+  uint32_t timestamp;
+
+} IMUPacket;
+
+
+// ---------- Live Quaternions ----------
+float q_waist[4];
+float q_rua[4];
+float q_rfa[4];
+float q_lua[4];
+float q_lfa[4];
+
+bool got_waist=false;
+bool got_rua=false;
+bool got_rfa=false;
+bool got_lua=false;
+bool got_lfa=false;
+
+
+// ---------- Calibration ----------
+bool calibrating=false;
+bool calibrated=false;
+
+const int TARGET_SAMPLES=300;
+int calibSamples=0;
+
+float ref_waist[4]={1,0,0,0};
+float ref_rua[4]={1,0,0,0};
+float ref_rfa[4]={1,0,0,0};
+float ref_lua[4]={1,0,0,0};
+float ref_lfa[4]={1,0,0,0};
+
+float sum_waist[4]={0,0,0,0};
+float sum_rua[4]={0,0,0,0};
+float sum_rfa[4]={0,0,0,0};
+float sum_lua[4]={0,0,0,0};
+float sum_lfa[4]={0,0,0,0};
+
+
+// ---------- Filters ----------
+float alpha=0.12;
+
+static float filtRight=0;
+static float filtLeft=0;
+
+
+
+// =============================
+// Quaternion Helpers
+// =============================
+
+void normalizeQ(float q[4]){
+
+ float n=sqrt(
+   q[0]*q[0]+
+   q[1]*q[1]+
+   q[2]*q[2]+
+   q[3]*q[3]);
+
+ if(n==0) return;
+
+ q[0]/=n;
+ q[1]/=n;
+ q[2]/=n;
+ q[3]/=n;
+}
+
+
+
+// out = A^-1 * B
+void relativeQuat(
+ float out[4],
+ float A[4],
+ float B[4]){
+
+ float w1=A[0];
+ float x1=-A[1];
+ float y1=-A[2];
+ float z1=-A[3];
+
+
+ out[0]=
+   w1*B[0]
+  -x1*B[1]
+  -y1*B[2]
+  -z1*B[3];
+
+ out[1]=
+   w1*B[1]
+  +x1*B[0]
+  +y1*B[3]
+  -z1*B[2];
+
+ out[2]=
+   w1*B[2]
+  -x1*B[3]
+  +y1*B[0]
+  +z1*B[1];
+
+ out[3]=
+   w1*B[3]
+  +x1*B[2]
+  -y1*B[1]
+  +z1*B[0];
+
+ normalizeQ(out);
+}
+
+
+
+
+// =============================
+// Receive Callback
+// =============================
+void onReceive(
+ const esp_now_recv_info_t *info,
+ const uint8_t *data,
+ int len){
+
+ IMUPacket p;
+
+ memcpy(&p,data,sizeof(p));
+
+
+
+ // -------- Update nodes --------
+
+ if(p.node_id==WAIST_NODE){
+
+   q_waist[0]=p.q0;
+   q_waist[1]=p.q1;
+   q_waist[2]=p.q2;
+   q_waist[3]=p.q3;
+
+   got_waist=true;
+ }
+
+
+ if(p.node_id==R_UPPER_NODE){
+
+   q_rua[0]=p.q0;
+   q_rua[1]=p.q1;
+   q_rua[2]=p.q2;
+   q_rua[3]=p.q3;
+
+   got_rua=true;
+ }
+
+
+ if(p.node_id==R_FORE_NODE){
+
+   q_rfa[0]=p.q0;
+   q_rfa[1]=p.q1;
+   q_rfa[2]=p.q2;
+   q_rfa[3]=p.q3;
+
+   got_rfa=true;
+ }
+
+
+ if(p.node_id==L_UPPER_NODE){
+
+   q_lua[0]=p.q0;
+   q_lua[1]=p.q1;
+   q_lua[2]=p.q2;
+   q_lua[3]=p.q3;
+
+   got_lua=true;
+ }
+
+
+ if(p.node_id==L_FORE_NODE){
+
+   q_lfa[0]=p.q0;
+   q_lfa[1]=p.q1;
+   q_lfa[2]=p.q2;
+   q_lfa[3]=p.q3;
+
+   got_lfa=true;
+ }
+
+
+
+ if(!(got_waist &&
+      got_rua &&
+      got_rfa &&
+      got_lua &&
+      got_lfa))
+ return;
+
+
+
+ // -------- Waiting --------
+ if(!calibrating && !calibrated){
+
+   got_waist=false;
+   got_rua=false;
+   got_rfa=false;
+   got_lua=false;
+   got_lfa=false;
+
+   return;
+ }
+
+
+
+ // ==========================
+ // Calibration
+ // ==========================
+ if(calibrating){
+
+   for(int i=0;i<4;i++){
+
+     sum_waist[i]+=q_waist[i];
+
+     sum_rua[i]+=q_rua[i];
+     sum_rfa[i]+=q_rfa[i];
+
+     sum_lua[i]+=q_lua[i];
+     sum_lfa[i]+=q_lfa[i];
+   }
+
+   calibSamples++;
+
+   if(calibSamples%20==0){
+
+      Serial.printf(
+       "Calibrating %d/%d\n",
+       calibSamples,
+       TARGET_SAMPLES);
+   }
+
+
+   if(calibSamples>=TARGET_SAMPLES){
+
+     for(int i=0;i<4;i++){
+
+       ref_waist[i]=
+        sum_waist[i]/calibSamples;
+
+       ref_rua[i]=
+        sum_rua[i]/calibSamples;
+
+       ref_rfa[i]=
+        sum_rfa[i]/calibSamples;
+
+       ref_lua[i]=
+        sum_lua[i]/calibSamples;
+
+       ref_lfa[i]=
+        sum_lfa[i]/calibSamples;
+     }
+
+     normalizeQ(ref_waist);
+
+     normalizeQ(ref_rua);
+     normalizeQ(ref_rfa);
+
+     normalizeQ(ref_lua);
+     normalizeQ(ref_lfa);
+
+     calibrating=false;
+     calibrated=true;
+
+     Serial.println(
+       "Calibration done.");
+   }
+
+
+   got_waist=false;
+   got_rua=false;
+   got_rfa=false;
+   got_lua=false;
+   got_lfa=false;
+
+   return;
+ }
+
+
+
+ // ==========================
+ // T-pose correction
+ // ==========================
+ float waist_corr[4];
+
+ float rua_corr[4];
+ float rfa_corr[4];
+
+ float lua_corr[4];
+ float lfa_corr[4];
+
+
+ relativeQuat(
+   waist_corr,
+   ref_waist,
+   q_waist);
+
+ relativeQuat(
+   rua_corr,
+   ref_rua,
+   q_rua);
+
+ relativeQuat(
+   rfa_corr,
+   ref_rfa,
+   q_rfa);
+
+ relativeQuat(
+   lua_corr,
+   ref_lua,
+   q_lua);
+
+ relativeQuat(
+   lfa_corr,
+   ref_lfa,
+   q_lfa);
+
+
+
+ // ==========================
+ // Waist-relative arm frames
+ // ==========================
+ float rua_rel[4];
+ float rfa_rel[4];
+
+ float lua_rel[4];
+ float lfa_rel[4];
+
+ relativeQuat(
+   rua_rel,
+   waist_corr,
+   rua_corr);
+
+ relativeQuat(
+   rfa_rel,
+   waist_corr,
+   rfa_corr);
+
+ relativeQuat(
+   lua_rel,
+   waist_corr,
+   lua_corr);
+
+ relativeQuat(
+   lfa_rel,
+   waist_corr,
+   lfa_corr);
+
+
+
+ // ==========================
+ // Elbows
+ // ==========================
+ float qRightElbow[4];
+ float qLeftElbow[4];
+
+
+ relativeQuat(
+   qRightElbow,
+   rua_rel,
+   rfa_rel);
+
+ relativeQuat(
+   qLeftElbow,
+   lua_rel,
+   lfa_rel);
+
+
+
+ float wr=qRightElbow[0];
+ float wl=qLeftElbow[0];
+
+ if(wr>1) wr=1;
+ if(wr<-1) wr=-1;
+
+ if(wl>1) wl=1;
+ if(wl<-1) wl=-1;
+
+
+ float rightAngle=
+   2*acos(wr)*57.3f;
+
+ float leftAngle=
+   2*acos(wl)*57.3f;
+
+
+
+ // low-pass
+ filtRight=
+   alpha*rightAngle
+  +(1-alpha)*filtRight;
+
+ filtLeft=
+   alpha*leftAngle
+  +(1-alpha)*filtLeft;
+
+
+ Serial.printf(
+   "R Elbow %.2f   L Elbow %.2f\n",
+   filtRight,
+   filtLeft);
+
+
+
+ // clear flags
+ got_waist=false;
+ got_rua=false;
+ got_rfa=false;
+ got_lua=false;
+ got_lfa=false;
+
+}
+
+
+
+
+// =============================
+// Setup
+// =============================
+void setup(){
+
+ Serial.begin(115200);
+
+ delay(2000);
+
+ WiFi.mode(WIFI_STA);
+
+ WiFi.begin();
+
+ delay(300);
+
+
+ uint8_t mac[6];
+
+ esp_wifi_get_mac(
+   WIFI_IF_STA,
+   mac);
+
+
+ Serial.printf(
+ "MAC %02X:%02X:%02X:%02X:%02X:%02X\n",
+ mac[0],mac[1],mac[2],
+ mac[3],mac[4],mac[5]);
+
+
+ esp_now_init();
+
+ esp_now_register_recv_cb(
+   onReceive);
+
+
+ Serial.println(
+   "Hold T-pose.");
+
+ Serial.println(
+   "Press c to calibrate.");
+}
+
+
+
+
+// =============================
+// Loop
+// =============================
+void loop(){
+
+ if(Serial.available()){
+
+   char cmd=
+    Serial.read();
+
+   if(cmd=='c'||
+      cmd=='C'){
+
+     if(!calibrated &&
+        !calibrating){
+
+       for(int i=0;i<4;i++){
+
+         sum_waist[i]=0;
+
+         sum_rua[i]=0;
+         sum_rfa[i]=0;
+
+         sum_lua[i]=0;
+         sum_lfa[i]=0;
+       }
+
+       calibSamples=0;
+
+       calibrating=true;
+
+       Serial.println(
+        "Starting calibration...");
+     }
+   }
+ }
+
+}
