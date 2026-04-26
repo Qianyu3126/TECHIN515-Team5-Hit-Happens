@@ -1,0 +1,148 @@
+#include <Wire.h>
+#include <WiFi.h>
+#include <esp_now.h>
+#include <LSM6DSOXSensor.h>
+#include <MadgwickAHRS.h>
+
+// ---------- NODE SETTINGS ----------
+#define NODE_ID 1          // WAIST NODE
+#define SDA_PIN D4
+#define SCL_PIN D5
+
+// Replace with your receiver ESP MAC
+uint8_t receiverAddress[] = {0x24,0x6F,0x28,0xAA,0xBB,0xCC};
+
+// ---------- IMU ----------
+TwoWire myWire = TwoWire(0);
+LSM6DSOXSensor imu(&myWire);
+Madgwick filter;
+
+// ---------- Packet ----------
+typedef struct {
+  uint8_t nodeID;
+
+  float ax, ay, az;
+  float gx, gy, gz;
+
+  float q0,q1,q2,q3;
+
+  unsigned long t;
+} SensorPacket;
+
+SensorPacket packet;
+
+
+// ---------- Send Callback ----------
+void OnDataSent(const uint8_t *mac_addr, esp_now_send_status_t status){
+  Serial.println(
+    status == ESP_NOW_SEND_SUCCESS ?
+    "Send Success" :
+    "Send Fail"
+  );
+}
+
+void setup() {
+
+  Serial.begin(115200);
+  delay(1000);
+
+  Serial.println("START");
+  Serial.print("NODE_ID=");
+  Serial.println(NODE_ID);
+
+  // I2C
+  myWire.begin(SDA_PIN, SCL_PIN);
+
+  // IMU
+  imu.begin();
+
+  uint8_t whoami;
+  imu.ReadID(&whoami);
+
+  Serial.print("WHO_AM_I=0x");
+  Serial.println(whoami,HEX);
+
+  if(whoami != 0x6C && whoami != 0x69){
+      Serial.println("IMU not found");
+      while(1);
+  }
+
+  imu.Enable_X();
+  imu.Enable_G();
+
+  // Madgwick @100Hz
+  filter.begin(100);
+
+  // WiFi + ESP-NOW
+  WiFi.mode(WIFI_STA);
+
+  if(esp_now_init()!=ESP_OK){
+      Serial.println("ESP-NOW Init Failed");
+      return;
+  }
+
+  esp_now_register_send_cb(OnDataSent);
+
+  esp_now_peer_info_t peerInfo={};
+  memcpy(peerInfo.peer_addr,receiverAddress,6);
+  peerInfo.channel=0;
+  peerInfo.encrypt=false;
+
+  if(esp_now_add_peer(&peerInfo)!=ESP_OK){
+      Serial.println("Peer Add Failed");
+      return;
+  }
+
+  Serial.println("Waist node ready");
+}
+
+void loop() {
+
+  int32_t accel[3];
+  int32_t gyro[3];
+
+  imu.Get_X_Axes(accel);
+  imu.Get_G_Axes(gyro);
+
+  // Convert units
+  float ax = accel[0]*0.001;
+  float ay = accel[1]*0.001;
+  float az = accel[2]*0.001;
+
+  float gx = gyro[0]*0.001;
+  float gy = gyro[1]*0.001;
+  float gz = gyro[2]*0.001;
+
+  // Update filter
+  filter.updateIMU(
+    gx,gy,gz,
+    ax,ay,az
+  );
+
+  // Fill packet
+  packet.nodeID = NODE_ID;
+
+  packet.ax=ax;
+  packet.ay=ay;
+  packet.az=az;
+
+  packet.gx=gx;
+  packet.gy=gy;
+  packet.gz=gz;
+
+  packet.q0=filter.q0;
+  packet.q1=filter.q1;
+  packet.q2=filter.q2;
+  packet.q3=filter.q3;
+
+  packet.t = millis();
+
+  // Send packet
+  esp_now_send(
+    receiverAddress,
+    (uint8_t*)&packet,
+    sizeof(packet)
+  );
+
+  delay(10); //100Hz
+}
