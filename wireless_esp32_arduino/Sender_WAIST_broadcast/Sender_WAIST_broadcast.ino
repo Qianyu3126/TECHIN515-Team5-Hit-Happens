@@ -1,17 +1,25 @@
 // =============================================================
-// WAIST.ino
+// Sender_WAIST_broadcast.ino
 // Waist-node sender (NODE_ID = 1) for 5-node tennis IMU system.
 // Sends raw accelerometer + gyroscope data via ESP-NOW.
 // No Madgwick, no quaternions on-device.
 //
-// UNICAST version (single receiver). For 3 receivers at once use
-// Sender_WAIST_broadcast.ino instead.
+// BROADCAST version: sends to FF:FF:FF:FF:FF:FF so ALL receiver
+// ESP32s on the same WiFi channel receive the same IMU stream at
+// once (forehand + backhand + serve boards simultaneously).
+//
+// Channel note: receivers connect to AP "robolab_5" and lock to its
+// channel; this node defaults to channel 1. They must match. If
+// receivers show this node offline, the AP is not on channel 1 —
+// uncomment the esp_wifi_set_channel() line below and set it to the
+// AP's channel.
 // =============================================================
 
 #include <Wire.h>
 #include <WiFi.h>
 #include <esp_now.h>
 #include <math.h>
+// #include "esp_wifi.h"   // only needed if you pin the channel below
 
 #define NODE_ID  1     // Waist
 #define SDA_PIN  D4
@@ -19,7 +27,8 @@
 #define IMU_ADDR 0x6A
 #define CALIB_SAMPLES 300
 
-uint8_t receiverAddress[] = {0x58,0x8C,0x81,0xAC,0x02,0xE8};
+// BROADCAST address — reaches every receiver on the channel at once.
+uint8_t receiverAddress[] = {0xFF,0xFF,0xFF,0xFF,0xFF,0xFF};
 
 typedef struct {
   uint8_t node_id;
@@ -117,14 +126,16 @@ void setup(){
   }
   esp_now_register_send_cb(onSent);
 
+  // esp_wifi_set_channel(1, WIFI_SECOND_CHAN_NONE);  // pin to AP channel if needed
+
   memcpy(peerInfo.peer_addr, receiverAddress, 6);
-  peerInfo.channel = 0;
+  peerInfo.channel = 0;        // 0 = use current channel
   peerInfo.encrypt = false;
   esp_now_add_peer(&peerInfo);
 
   packet.node_id = NODE_ID;
 
-  Serial.printf("Node %d (WAIST) ready.\n", NODE_ID);
+  Serial.printf("Node %d (WAIST) ready. [BROADCAST]\n", NODE_ID);
 }
 
 void loop(){

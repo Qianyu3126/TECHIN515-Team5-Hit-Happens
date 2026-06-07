@@ -1,25 +1,37 @@
 /*
- * forehand_test.ino  — Supabase integration version
- * Added on top of the original:
- *   - WiFi password connection
- *   - postToSupabase() function
- *   - printResult() auto-POSTs after inference
+ * serve.ino  — Tennis Motion Analyzer receiver (SERVE model)
+ *
+ * One of three near-identical receiver sketches (forehand / backhand / serve).
+ * Flash this one onto the receiver ESP32 when practicing serves.
+ * Only the marked "PER-MODEL" sections differ between the three folders:
+ *   1. the Edge Impulse model #include
+ *   2. MY_MODEL  (tags results + filters commands so the UI routes by stroke)
+ *   3. label normalization + feedback copy in postToSupabase()/printResult()
+ * The ESP-NOW receive, calibration, recording and inference engine are identical
+ * across all three — the engine auto-adapts to each model via the EI_* constants.
  *
  * Library to install (Arduino Library Manager):
  *   ArduinoJson  by Benoit Blanchon  (v6+)
+ * Plus the model library:  models/ei-serve-arduino-...zip
  *
- * Edit two lines to enable upload:
- *   WIFI_SSID / WIFI_PASSWORD  ->  your network
+ * Edit two lines to enable upload:  WIFI_SSID / WIFI_PASSWORD
  */
 
 #include <WiFi.h>
-#include <WiFiClientSecure.h>     // added (needed for HTTPS)
+#include <WiFiClientSecure.h>
 #include <esp_now.h>
 #include "esp_wifi.h"
 #include <math.h>
-#include <HTTPClient.h>          // added
-#include <ArduinoJson.h>         // added (library required)
-#include <a0605_TECHIN515_Group_inferencing.h>
+#include <HTTPClient.h>
+#include <ArduinoJson.h>
+
+// ── PER-MODEL (1/3): Edge Impulse model library ───────────────
+#include <murphywei2000-project-1_inferencing.h>
+
+// ── PER-MODEL (2/3): this board's stroke ──────────────────────
+// Tags every result row, and filters the commands table so this board
+// only reacts to UI buttons pressed on the matching tab.
+#define MY_MODEL "serve"
 
 // ── WiFi credentials (your network) ───────────
 #define WIFI_SSID     "robolab_5"
@@ -88,10 +100,10 @@ bool allNodesSeen = false;
 
 // ── Inference buffer ──────────────────────────
 #define N_AXES           10
-// 1200 frames = 12 s @100Hz, plenty for a forehand swing (~6 s).
-// The old 3000-frame static array used ~117 KB of heap, leaving only ~38 KB
-// at upload time — not enough for a TLS (HTTPS) connection (~40-50 KB) -> connection refused.
-// 1200 frames frees ~70 KB, raising pre-upload free heap to ~108 KB, enough for TLS.
+// 1200 frames = 12 s @100Hz, plenty for any swing.
+// The window length is derived from the model below: window_size =
+// EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE / N_AXES, so this same engine adapts to
+// forehand (4 s window) and backhand/serve (2 s window) with no changes.
 #define MAX_FRAMES       1200
 #define MOTION_THRESHOLD 20.0f
 
@@ -112,30 +124,30 @@ void postToSupabase(const char* label, float confidence) {
     return;
   }
 
-  // Label normalization: model may output without prefix or with spelling
-  // variants; map them all to the standard labels
+  // ── PER-MODEL (3/3): label normalization (serve) ──
+  // model raw labels: "correct", "incomplete_backswing", "incomplete_followthrough"
   String labelStr(label);
   String normalized;
-  if (labelStr == "forehand_correct"   || labelStr == "correct"   || labelStr == "standard") {
-    normalized = "forehand_correct";
-  } else if (labelStr == "forehand_incomplete_backswing"  || labelStr == "incomplete backswing"  || labelStr == "incomplete_backswing") {
-    normalized = "forehand_incomplete_backswing";
-  } else if (labelStr == "forehand_incomplete_followthrough" || labelStr == "incomplete followthough" || labelStr == "incomplete_followthough" || labelStr == "incomplete followthrough" || labelStr == "incomplete_followthrough") {
-    normalized = "forehand_incomplete_followthrough";
+  if (labelStr == "correct" || labelStr == "standard" || labelStr == "serve_correct") {
+    normalized = "serve_correct";
+  } else if (labelStr == "incomplete_backswing" || labelStr == "incomplete backswing" || labelStr == "serve_incomplete_backswing") {
+    normalized = "serve_incomplete_backswing";
+  } else if (labelStr == "incomplete_followthrough" || labelStr == "incomplete followthrough" || labelStr == "incomplete followthough" || labelStr == "incomplete_followthough" || labelStr == "serve_incomplete_followthrough") {
+    normalized = "serve_incomplete_followthrough";
   } else {
     normalized = labelStr;  // unknown label passed through as-is
   }
   const char* normLabel = normalized.c_str();
   Serial.printf("# [Supabase] label normalized: %s -> %s\n", label, normLabel);
 
-  // build feedback string
+  // ── PER-MODEL (3/3): feedback copy (serve) ──
   const char* feedback = "";
-  if (normalized == "forehand_correct") {
-    feedback = "Solid forehand. Full takeback, good contact point, and clean follow-through.";
-  } else if (normalized == "forehand_incomplete_backswing") {
-    feedback = "Short takeback: the racket doesn't travel far enough back before contact. Rotate the shoulder fully to load up power.";
-  } else if (normalized == "forehand_incomplete_followthrough") {
-    feedback = "Incomplete follow-through: the swing stops short of the shoulder. Let the racket finish high on the opposite side.";
+  if (normalized == "serve_correct") {
+    feedback = "Great serve. Full arm extension and complete follow-through. Keep it up.";
+  } else if (normalized == "serve_incomplete_backswing") {
+    feedback = "Short racket drop: your backswing doesn't load fully behind your back. Let the racket drop deep before driving up to the ball.";
+  } else if (normalized == "serve_incomplete_followthrough") {
+    feedback = "Incomplete follow-through: the racket arm doesn't complete its downward swing. Let the momentum carry through to finish across your body.";
   } else {
     feedback = "Swing recorded. Keep practicing!";
   }
@@ -143,7 +155,7 @@ void postToSupabase(const char* label, float confidence) {
   Serial.printf("# [Supabase] free heap before upload: %u bytes\n", ESP.getFreeHeap());
 
   StaticJsonDocument<256> doc;
-  doc["model"]      = "forehand";
+  doc["model"]      = MY_MODEL;
   doc["predicted"]  = normLabel;
   doc["confidence"] = confidence;
   doc["feedback"]   = feedback;
@@ -203,14 +215,14 @@ void printResult(const char* label, float confidence) {
   Serial.println("# ------------------");
 
   String ls(label);
-  if (ls == "forehand_correct" || ls == "correct" || ls == "standard") {
-    Serial.println("# [OK] Correct form — solid forehand, keep it up!");
-  } else if (ls == "forehand_incomplete_backswing" || ls == "incomplete backswing" || ls == "incomplete_backswing") {
-    Serial.println("# [X] Issue: short takeback");
-    Serial.println("# -> Rotate the shoulder fully and take the racket farther back to load up power");
-  } else if (ls == "forehand_incomplete_followthrough" || ls == "incomplete followthough" || ls == "incomplete_followthough" || ls == "incomplete followthrough" || ls == "incomplete_followthrough") {
+  if (ls == "correct" || ls == "standard" || ls == "serve_correct") {
+    Serial.println("# [OK] Correct form — great serve, keep it up!");
+  } else if (ls == "incomplete_backswing" || ls == "incomplete backswing") {
+    Serial.println("# [X] Issue: short racket drop");
+    Serial.println("# -> Let the racket drop deep behind your back to load before driving up to the ball");
+  } else if (ls == "incomplete_followthrough" || ls == "incomplete followthrough") {
     Serial.println("# [X] Issue: incomplete follow-through");
-    Serial.println("# -> Let the racket swing over and finish high on the opposite shoulder");
+    Serial.println("# -> Let the momentum carry the racket through to finish across your body");
   } else {
     Serial.printf("# Label: %s\n", label);
   }
@@ -223,7 +235,7 @@ void printResult(const char* label, float confidence) {
 }
 
 // ─────────────────────────────────────────────
-// Inference main function (unchanged)
+// Inference main function (model-agnostic)
 // ─────────────────────────────────────────────
 void runInference() {
   int window_size = EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE / N_AXES;
@@ -247,7 +259,7 @@ void runInference() {
   Serial.printf("# Motion range: %.1f deg\n", motion_range);
 
   if (motion_range < MOTION_THRESHOLD) {
-    Serial.println("# No forehand motion detected (range too small), please retry");
+    Serial.println("# No motion detected (range too small), please retry");
     return;
   }
 
@@ -420,14 +432,14 @@ void checkNodeConnections() {
 }
 
 // ─────────────────────────────────────────────
-// setup (only the WiFi.begin() line changed)
+// setup
 // ─────────────────────────────────────────────
 void setup() {
   Serial.begin(115200);
   delay(2000);
 
   WiFi.mode(WIFI_STA);
-  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);  // changed: added password
+  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
   Serial.print("# Connecting to WiFi");
   int tries = 0;
   while (WiFi.status() != WL_CONNECTED && tries < 20) {
@@ -451,7 +463,7 @@ void setup() {
 
   Serial.println("#");
   Serial.println("# ==============================");
-  Serial.println("#    Forehand Motion Analyzer");
+  Serial.println("#    Serve Motion Analyzer");
   Serial.println("# ------------------------------");
   Serial.println("#   c -> Calibrate (keep all nodes still)");
   Serial.println("#   s -> Start recording");
@@ -528,6 +540,8 @@ const uint32_t CMD_POLL_INTERVAL_MS = 1000;   // query once per second
 
 // Poll the commands table.
 // applyBaseline=true only records the baseline, does not execute commands (used at boot).
+// NOTE: every query is filtered by model=eq.MY_MODEL so this board only reacts
+// to commands sent from its own stroke tab in the UI.
 void pollCommands(bool applyBaseline = false) {
   if (WiFi.status() != WL_CONNECTED) return;
 
@@ -537,13 +551,13 @@ void pollCommands(bool applyBaseline = false) {
   HTTPClient http;
   String url;
   if (applyBaseline) {
-    // baseline mode: only take the id of the latest row
+    // baseline mode: only take the id of the latest row for this model
     url = String(SUPABASE_URL) +
-          "/rest/v1/commands?select=id,type&order=id.desc&limit=1";
+          "/rest/v1/commands?select=id,type&model=eq." MY_MODEL "&order=id.desc&limit=1";
   } else {
-    // normal mode: take all commands greater than lastCmdId, execute ascending (avoid missing intermediate commands)
+    // normal mode: take all commands for this model greater than lastCmdId, execute ascending
     url = String(SUPABASE_URL) +
-          "/rest/v1/commands?select=id,type&id=gt." + String(lastCmdId) +
+          "/rest/v1/commands?select=id,type&model=eq." MY_MODEL "&id=gt." + String(lastCmdId) +
           "&order=id.asc&limit=10";
   }
   http.begin(client, url);
