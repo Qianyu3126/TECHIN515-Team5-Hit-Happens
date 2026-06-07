@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Tennis Motion Analyzer</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Hanken+Grotesk:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
+<style>
+  :root {
+    --bg:#0E1311; --bg2:#090C0A; --surface:#161D19; --surface2:#1B241F;
+    --surface3:#212C26; --line:rgba(196,216,186,0.10); --line2:rgba(196,216,186,0.16);
+    --text:#ECF2E8; --muted:#8C988D; --muted2:#5C6960;
+    --lime:#CFF23E; --lime-deep:#A6C82C; --lime-dim:rgba(207,242,62,0.14);
+    --amber:#F2B23E; --amber-dim:rgba(242,178,62,0.14);
+    --red:#F26A4B; --red-dim:rgba(242,106,75,0.16);
+    --ok:#79E39A;
+  }
+  * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+  html,body { margin:0; padding:0; height:100%; }
+  body {
+    background:
+      radial-gradient(120% 90% at 50% -10%, #EEF0EB 0%, #DFE3DC 55%, #D2D7CE 100%);
+    font-family:'Hanken Grotesk', system-ui, sans-serif;
+    display:flex; align-items:center; justify-content:center;
+    min-height:100%; overflow:hidden;
+  }
+  #stage { transform-origin:center center; }
+
+  .mono { font-family:'Space Grotesk', monospace; font-variant-numeric:tabular-nums; }
+
+  /* tactile press */
+  .tap { transition:transform .12s cubic-bezier(.3,.7,.3,1), opacity .18s ease, box-shadow .18s ease, color .18s ease; }
+  .tap:active { transform:scale(.965); }
+  .tap[disabled] { cursor:default; }
+  .tap[disabled]:active { transform:none; }
+
+  @keyframes livePulse {
+    0%,100% { box-shadow:0 0 0 0 rgba(207,242,62,.55); }
+    70% { box-shadow:0 0 0 6px rgba(207,242,62,0); }
+  }
+  @keyframes recRing {
+    0%,100% { box-shadow:0 0 0 0 rgba(242,106,75,.5), inset 0 0 0 1px rgba(242,106,75,.4); }
+    70% { box-shadow:0 0 0 10px rgba(242,106,75,0), inset 0 0 0 1px rgba(242,106,75,.4); }
+  }
+  @keyframes spin { to { transform:rotate(360deg); } }
+  @keyframes scanSweep {
+    0% { transform:translateX(-120%); }
+    100% { transform:translateX(120%); }
+  }
+  @keyframes resultIn {
+    from { opacity:0; transform:translateY(14px) scale(.98); }
+    to { opacity:1; transform:none; }
+  }
+  @keyframes rowIn {
+    from { opacity:0; transform:translateY(-8px); }
+    to { opacity:1; transform:none; }
+  }
+  @keyframes dotBlink {
+    0%,100% { opacity:1; } 50% { opacity:.25; }
+  }
+  @keyframes barShine {
+    0% { transform:translateX(-100%); } 100% { transform:translateX(260%); }
+  }
+
+  /* hide scrollbar inside device for clean look */
+  .noscroll::-webkit-scrollbar { width:0; height:0; }
+  .noscroll { scrollbar-width:none; }
+</style>
+</head>
+<body>
+  <div id="stage"></div>
+
+  <script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+  <script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+  <script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+
+  <script type="text/babel" src="ios-frame.jsx"></script>
+  <script type="text/babel" src="splash.jsx"></script>
+  <script type="text/babel" src="app.jsx"></script>
+
+  <script>
+    // Fit the fixed-size device into any viewport
+    function fitStage(){
+      var stage = document.getElementById('stage');
+      if(!stage || !stage.firstChild) return;
+      var dev = stage.firstChild;
+      var w = dev.offsetWidth || 390, h = dev.offsetHeight || 844;
+      var s = Math.min((window.innerWidth-32)/w, (window.innerHeight-32)/h, 1.05);
+      stage.style.transform = 'scale(' + s + ')';
+    }
+    window.addEventListener('resize', fitStage);
+    window.__fitStage = fitStage;
+  </script>
+</body>
+</html>
